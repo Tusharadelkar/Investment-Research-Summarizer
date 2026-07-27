@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Investment Research Summarizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <div class="background-orb orb-one"></div>
+  <div class="background-orb orb-two"></div>
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="brand-mark">IR</span>
+      <span>
+        <strong>Investment Research</strong>
+        <small>Document intelligence workspace</small>
+      </span>
+    </a>
+    <button id="new-document" class="button button-quiet hidden">Upload new PDF</button>
+  </header>
+
+  <main class="shell">
+    <section id="upload-view" class="upload-view">
+      <div class="hero-copy">
+        <span class="eyebrow">RESEARCH, DISTILLED</span>
+        <h1>Turn a dense PDF into an explorable investment brief.</h1>
+        <p>Upload a report to uncover its themes, key figures, risks, opportunities, and ask grounded questions with page-level evidence.</p>
+        <div class="feature-row">
+          <span>Hybrid search</span>
+          <span>Page citations</span>
+          <span>Private local indexing</span>
+        </div>
+      </div>
+
+      <div class="upload-card">
+        <div id="drop-zone" class="drop-zone" tabindex="0">
+          <div class="upload-icon">↑</div>
+          <h2>Drop your research PDF here</h2>
+          <p>or click to browse · maximum 40 MB</p>
+          <input id="file-input" type="file" accept=".pdf,application/pdf" hidden>
+        </div>
+        <div id="selected-file" class="selected-file hidden"></div>
+        <button id="process-button" class="button button-primary" disabled>Analyse document</button>
+        <div id="upload-error" class="error-box hidden"></div>
+
+        <div id="processing-state" class="processing hidden">
+          <div class="spinner"></div>
+          <div>
+            <strong>Reading and indexing your document</strong>
+            <p id="processing-message">Extracting pages and preparing hybrid search…</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="dashboard-view" class="dashboard hidden">
+      <div class="document-heading">
+        <div>
+          <span class="eyebrow">CURRENT DOCUMENT</span>
+          <h1 id="document-name">—</h1>
+          <p id="document-meta">Ready for analysis</p>
+        </div>
+        <span class="status-pill"><i></i> Indexed</span>
+      </div>
+
+      <nav class="tabs" aria-label="Document workspace">
+        <button class="tab active" data-tab="analytics">Document analytics</button>
+        <button class="tab" data-tab="qa">Ask the document</button>
+      </nav>
+
+      <section id="analytics-tab" class="tab-panel">
+        <div id="metric-grid" class="metric-grid"></div>
+
+        <div class="content-grid">
+          <article class="panel summary-panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">EXECUTIVE VIEW</span>
+                <h2>Document overview</h2>
+              </div>
+              <span id="llm-state" class="subtle-pill"></span>
+            </div>
+            <p id="summary-text" class="summary-text"></p>
+          </article>
+
+          <article class="panel terms-panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">LANGUAGE SIGNALS</span>
+                <h2>Top terms</h2>
+              </div>
+            </div>
+            <div id="term-list" class="term-list"></div>
+          </article>
+        </div>
+
+        <div class="insight-grid">
+          <article class="panel insight-card">
+            <span class="insight-icon finding">◆</span>
+            <h2>Key findings</h2>
+            <ul id="findings-list"></ul>
+          </article>
+          <article class="panel insight-card">
+            <span class="insight-icon risk">!</span>
+            <h2>Risks & constraints</h2>
+            <ul id="risks-list"></ul>
+          </article>
+          <article class="panel insight-card">
+            <span class="insight-icon opportunity">↗</span>
+            <h2>Opportunities</h2>
+            <ul id="opportunities-list"></ul>
+          </article>
+        </div>
+
+        <div class="content-grid lower-grid">
+          <article class="panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">TOPIC FREQUENCY</span>
+                <h2>Research themes</h2>
+              </div>
+            </div>
+            <div id="topic-chart" class="bar-chart"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">EXTRACTED VALUES</span>
+                <h2>Financial markers</h2>
+              </div>
+            </div>
+            <div id="metrics-list" class="chip-list"></div>
+          </article>
+        </div>
+
+        <article id="visuals-panel" class="panel visuals-panel hidden">
+          <div class="panel-heading">
+            <div>
+              <span class="panel-kicker">PDF VISUALS</span>
+              <h2>Images, charts and graph pages</h2>
+            </div>
+            <span class="subtle-pill">Click to enlarge</span>
+          </div>
+          <div id="visual-gallery" class="visual-gallery"></div>
+        </article>
+      </section>
+
+      <section id="qa-tab" class="tab-panel hidden">
+         <div class="qa-layout">
+           <aside class="qa-sidebar panel">
+             <div class="avatar-card">
+               <div class="avatar-header">
+                 <span class="avatar-status-indicator"></span>
+                 <span id="avatar-status-text">Aria (Idle)</span>
+               </div>
+               <div class="avatar-container">
+                 <canvas id="avatar-canvas" width="220" height="220"></canvas>
+               </div>
+               <div class="avatar-controls">
+                 <div class="control-row">
+                   <span class="control-label">Auto-Speak</span>
+                   <label class="toggle-switch">
+                     <input type="checkbox" id="auto-speak-toggle" checked>
+                     <span class="slider"></span>
+                   </label>
+                 </div>
+                 <div class="control-row">
+                   <span class="control-label">Voice</span>
+                   <select id="voice-select" class="voice-select">
+                     <option value="">Default Voice</option>
+                   </select>
+                 </div>
+               </div>
+             </div>
+             <hr class="avatar-divider">
+
+             <span class="panel-kicker">START HERE</span>
+            <h2>Suggested questions</h2>
+            <div class="suggestions">
+              <button>What are the main conclusions?</button>
+              <button>Which risks should an investor consider?</button>
+              <button>What financial figures are most important?</button>
+              <button>Summarize the growth opportunities.</button>
+            </div>
+            <div class="grounding-note">
+              <strong>Grounded answers</strong>
+              <p>Every answer is generated from retrieved excerpts in this PDF and includes source pages.</p>
+            </div>
+          </aside>
+
+          <section class="chat-panel panel">
+            <div id="chat-messages" class="chat-messages">
+              <div class="welcome-message">
+                <span class="assistant-avatar">IR</span>
+                <div>
+                  <strong>Ask me about this report</strong>
+                  <p>I’ll search the current document and show the evidence behind my answer.</p>
+                </div>
+              </div>
+            </div>
+
+            <form id="chat-form" class="chat-form">
+              <textarea id="question-input" rows="2" placeholder="Ask a question about the current document…" required></textarea>
+              <button id="voice-input-btn" class="mic-button hidden" type="button" aria-label="Ask with voice">
+                <svg viewBox="0 0 24 24" width="24" height="24">
+                  <path fill="currentColor" d="M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2M19,11C19,14.53 16.39,17.44 13,17.93V21H11V17.93C7.61,17.44 5,14.53 5,11H7A5,5 0 0,0 12,16A5,5 0 0,0 17,11H19Z" />
+                </svg>
+              </button>
+              <button class="send-button" type="submit" aria-label="Send question">→</button>
+            </form>
+          </section>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="image-dialog" class="image-dialog">
+    <button id="close-dialog" aria-label="Close image">×</button>
+    <strong id="dialog-title"></strong>
+    <img id="dialog-image" alt="PDF page preview">
+  </dialog>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
