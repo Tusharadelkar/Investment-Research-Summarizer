@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login - Investment Research Summarizer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <style>
+    .auth-container { max-width: 400px; margin: 100px auto; padding: 2rem; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; }
+    .auth-container h1 { text-align: center; margin-bottom: 2rem; }
+    .form-group { margin-bottom: 1rem; }
+    .form-group label { display: block; margin-bottom: 0.5rem; font-size: 0.875rem; color: #a1a1aa; }
+    .form-group input { width: 100%; padding: 0.75rem; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; color: white; }
+    .auth-button { width: 100%; margin-top: 1rem; }
+    .auth-links { text-align: center; margin-top: 1.5rem; font-size: 0.875rem; }
+    .auth-links a { color: var(--text-muted); text-decoration: underline; }
+    .alert { padding: 0.75rem; margin-bottom: 1rem; border-radius: 6px; background: rgba(157, 62, 56, 0.2); border: 1px solid var(--danger); color: #f87171; text-align: center; }
+    .success-alert { background: rgba(23, 79, 60, 0.2); border-color: var(--forest); color: #4ade80; }
+  </style>
+</head>
+<body>
+  <div class="background-orb orb-one"></div>
+  <div class="background-orb orb-two"></div>
+  <main class="shell">
+    <div class="auth-container">
+      <h1>Welcome back</h1>
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert {% if category == 'success' %}success-alert{% endif %}">{{ message }}</div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
+      <form method="POST" action="/login">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" required autofocus>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" required>
+        </div>
+        <button type="submit" class="button button-primary auth-button">Sign In</button>
+      </form>
+      <div class="auth-links">
+        <p>Don't have an account? <a href="/register">Create one</a></p>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

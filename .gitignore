@@ -18,3 +18,7 @@ uploads/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Databases
+documents.db
+chroma_db/

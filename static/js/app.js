@@ -55,21 +55,76 @@ processButton.addEventListener("click", async () => {
   hideError();
 
   try {
+    $("#processing-message").textContent = "Processing document, this may take a moment...";
+
     const response = await fetch("/api/documents", { method: "POST", body: formData });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Document processing failed.");
+    
     state.documentId = data.document_id;
     state.document = data;
     renderDashboard(data);
+    setProcessing(false);
+
   } catch (error) {
     showError(error.message);
-  } finally {
     setProcessing(false);
   }
 });
 
 $("#new-document").addEventListener("click", () => window.location.reload());
 
+const settingsModal = $("#settings-modal");
+const settingsButton = $("#settings-button");
+const closeSettings = $("#close-settings");
+
+if (settingsButton) {
+  settingsButton.addEventListener("click", () => {
+    settingsModal.showModal();
+  });
+}
+
+if (closeSettings) {
+  closeSettings.addEventListener("click", () => {
+    settingsModal.close();
+  });
+}
+
+const exportButton = $("#export-button");
+if (exportButton) {
+  exportButton.addEventListener("click", () => {
+    if (state.documentId) {
+      window.open(`/api/documents/${state.documentId}/export`, "_blank");
+    }
+  });
+}
+
+const regenerateButton = $("#regenerate-button");
+if (regenerateButton) {
+  regenerateButton.addEventListener("click", async () => {
+    if (!state.documentId) return;
+    const statusEl = $("#regenerate-status");
+    regenerateButton.disabled = true;
+    statusEl.textContent = "Regenerating… this may take a minute.";
+
+    try {
+      const response = await fetch(`/api/documents/${state.documentId}/regenerate-overview`, {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Regeneration failed.");
+      // Update the in-memory document state
+      state.document = data;
+      // Re-render only the overview section — no full page reload needed
+      renderOverview(data);
+      statusEl.textContent = "Done! Insights updated.";
+      setTimeout(() => { statusEl.textContent = ""; }, 4000);
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+      regenerateButton.disabled = false;
+    }
+  });
+}
 $$(".tab").forEach((button) => {
   button.addEventListener("click", () => {
     $$(".tab").forEach((tab) => tab.classList.remove("active"));
@@ -98,11 +153,7 @@ function renderDashboard(data) {
     <article class="metric-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>
   `).join("");
 
-  $("#summary-text").textContent = data.overview.summary || "No summary is available.";
-  $("#llm-state").textContent = data.llm_available ? "AI generated" : "Extractive preview";
-  renderList("#findings-list", data.overview.key_findings, "Configure an LLM key to generate findings.");
-  renderList("#risks-list", data.overview.risks, "Configure an LLM key to identify risks.");
-  renderList("#opportunities-list", data.overview.opportunities, "Configure an LLM key to identify opportunities.");
+  renderOverview(data);
 
   $("#term-list").innerHTML = data.analytics.top_terms.map((item) =>
     `<span class="term">${escapeHtml(item.term)} <b>${item.count}</b></span>`
@@ -123,6 +174,30 @@ function renderDashboard(data) {
     : `<p class="empty-copy">No obvious currency, percentage, or reporting-period markers were found.</p>`;
 
   renderVisualGallery(data.visual_pages || []);
+}
+
+// Renders just the overview section (summary, findings, risks, opportunities).
+// Called both on initial load and after a successful regeneration.
+function renderOverview(data) {
+  // Show the regenerate bar when LLM was unavailable OR when findings are empty
+  // (covers: no API key, thinking-model JSON parse failure, any silent LLM error)
+  const overviewFailed = !data.llm_available || !data.overview.key_findings?.length;
+
+  $("#summary-text").textContent = data.overview.summary || "No summary is available.";
+  $("#llm-state").textContent = data.llm_available ? "AI generated" : "Extractive preview";
+
+  const msg = data.overview.note || "Configure an LLM key to generate insights.";
+  renderList("#findings-list", data.overview.key_findings, msg);
+  renderList("#risks-list", data.overview.risks, msg);
+  renderList("#opportunities-list", data.overview.opportunities, msg);
+
+  // Show regenerate button if overview is empty / LLM was unavailable
+  const regenBar = $("#regenerate-bar");
+  if (overviewFailed) {
+    regenBar.classList.remove("hidden");
+  } else {
+    regenBar.classList.add("hidden");
+  }
 }
 
 function renderVisualGallery(visuals) {

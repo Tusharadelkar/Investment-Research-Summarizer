@@ -10,6 +10,10 @@ from werkzeug.utils import secure_filename
 
 # Import the core document service logic
 from services.document_service import DocumentService
+from services.database import init_db
+
+# Initialize database
+init_db()
 
 # Define paths: base directory of the project and the upload directory
 BASE_DIR = Path(__file__).resolve().parent
@@ -87,10 +91,10 @@ def get_document(document_id):
     Purpose: Retrieves metadata and analytics for a previously uploaded document by its ID.
              Returns 404 if the document ID is not found.
     """
-    record = document_service.get(document_id)
-    if record is None:
-        return jsonify({"error": "Document not found or server was restarted."}), 404
-    return jsonify(record.public_payload())
+    payload = document_service.get(document_id)
+    if payload is None:
+        return jsonify({"error": "Document not found."}), 404
+    return jsonify(payload)
 
 
 @app.post("/api/documents/<document_id>/ask")
@@ -131,6 +135,21 @@ def page_preview(document_id, page_number):
         return jsonify({"error": "Document not found or server was restarted."}), 404
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
+
+
+@app.post("/api/documents/<document_id>/regenerate-overview")
+def regenerate_overview(document_id):
+    """
+    Route: POST /api/documents/<document_id>/regenerate-overview
+    Purpose: Re-runs LLM overview generation for an already-indexed document.
+             Useful when the document was processed with a broken/missing LLM key.
+    """
+    try:
+        return jsonify(document_service.regenerate_overview(document_id))
+    except KeyError:
+        return jsonify({"error": "Document not found."}), 404
+    except Exception as exc:
+        return jsonify({"error": f"Overview regeneration failed: {exc}"}), 500
 
 
 @app.errorhandler(413)

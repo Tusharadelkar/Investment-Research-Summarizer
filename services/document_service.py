@@ -1,62 +1,19 @@
 import os
 import re
-import threading
 import time
 import base64
-from dataclasses import dataclass
+import json
 from pathlib import Path
 
 # fitz is PyMuPDF, used to load and parse PDF files
-import fitz
+import pymupdf as fitz
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Relative imports from current app services
 from services.analytics import build_analytics, clean_text
 from services.llm_service import LLMService
 from services.retrieval import HybridRetriever
-
-
-@dataclass
-class DocumentRecord:
-    """
-    Data structure representing a processed document in-memory.
-    Holds document IDs, text chunks, cached analytics, vector search indexes,
-    and visual page lists.
-    """
-    document_id: str
-    filename: str
-    file_path: Path
-    chunks: list
-    analytics: dict
-    retriever: HybridRetriever
-    overview: dict
-    elapsed_seconds: float
-    llm_available: bool
-    vision_available: bool
-    visual_pages: list
-    preview_dir: Path
-
-    def public_payload(self):
-        """
-        Filters and structures the raw document data to return a clean payload
-        for the web interface. Contains references to visual previews up to 18 pages.
-        """
-        return {
-            "document_id": self.document_id,
-            "filename": self.filename,
-            "analytics": self.analytics,
-            "overview": self.overview,
-            "processing_seconds": round(self.elapsed_seconds, 2),
-            "llm_available": self.llm_available,
-            "vision_available": self.retriever is not None and self.vision_available,
-            "visual_pages": [
-                {
-                    "page": page,
-                    "url": f"/api/documents/{self.document_id}/pages/{page}/preview",
-                }
-                for page in self.visual_pages[:18]
-            ],
-        }
+from services.database import SessionLocal, DocumentModel, DocumentAnalyticsModel, DocumentOverviewModel
 
 
 class DocumentService:
@@ -67,11 +24,13 @@ class DocumentService:
     def __init__(self):
         """
         Initializes the document service with default configuration settings.
-        Sets up the text splitter and establishes the records cache.
+        Sets up the text splitter and establishes the retriever cache.
+        NOTE: LLMService is NOT cached here — it is resolved per-request so
+        that user-specific API keys stored in the database are always used.
         """
-        self.records = {}  # In-memory document storage
-        self.lock = threading.Lock()  # Ensure thread-safe read/write operations
-        self.llm = LLMService()  # Configure the LLM service connection
+        # In-memory cache for HybridRetriever instances (keyed by document_id).
+        # Populated during process() and reloaded lazily from disk after a restart.
+        self._retriever_cache: dict = {}
         
         # Load embedding model and character chunk settings from environment variables
         self.embedding_model = os.getenv(
@@ -84,11 +43,103 @@ class DocumentService:
             separators=["\n\n", "\n", ". ", " ", ""],
         )
 
+    def _get_llm(self, user_id=None) -> LLMService:
+        """
+        Returns a fresh LLMService instance for the given user.
+        If the user has a personal API key stored in the database it is used;
+        otherwise the service falls back to the environment-variable keys.
+        This ensures the key is never stale after a server restart or after
+        the user saves/updates their key via the UI settings.
+        """
+        if user_id is not None:
+            try:
+                from services.database import SessionLocal, UserModel
+                with SessionLocal() as session:
+                    user = session.query(UserModel).filter_by(id=user_id).first()
+                    if user and user.api_key:
+                        return LLMService(api_key=user.api_key)
+            except Exception:
+                pass  # Fall through to env-based initialisation
+        return LLMService()
+
+    def _get_retriever(self, document_id: str) -> HybridRetriever:
+        """
+        Returns the cached HybridRetriever for document_id, loading it from
+        disk (ChromaDB + pickle) on first access after a server restart.
+        """
+        if document_id not in self._retriever_cache:
+            self._retriever_cache[document_id] = HybridRetriever(
+                document_id, model_name=self.embedding_model
+            )
+        return self._retriever_cache[document_id]
+
     def get(self, document_id):
         """
         Fetches an active DocumentRecord by its document ID.
         """
-        return self.records.get(document_id)
+        with SessionLocal() as session:
+            record = session.query(DocumentModel).filter_by(id=document_id).first()
+            if record:
+                return record.public_payload()
+            return None
+
+    @property
+    def llm(self):
+        """Convenience accessor — returns a fresh env-based LLM (no user context)."""
+        return self._get_llm()
+
+    def regenerate_overview(self, document_id):
+        """
+        Re-runs the LLM overview generation for an existing indexed document.
+        Loads chunks from the persisted retriever index and updates the DB overview.
+        Uses the document owner's stored API key when available.
+        """
+        with SessionLocal() as session:
+            record = session.query(DocumentModel).filter_by(id=document_id).first()
+            if not record:
+                raise KeyError("Document not found.")
+            analytics_pages = record.analytics.pages
+            analytics_words = record.analytics.words
+            user_id = record.user_id  # Capture owner id for LLM key resolution
+
+        # Resolve the LLM using the document owner's API key (if any)
+        llm = self._get_llm(user_id)
+
+        retriever = self._get_retriever(document_id)
+
+        # Reconstruct chunks from BM25 index for overview generation
+        chunks = retriever.child_chunks
+
+        # Minimal analytics dict needed for the overview prompt
+        analytics = {"pages": analytics_pages, "words": analytics_words}
+        overview = self._build_overview(chunks, retriever, analytics, llm=llm)
+
+        with SessionLocal() as session:
+            record = session.query(DocumentModel).filter_by(id=document_id).first()
+            if not record:
+                raise KeyError("Document not found.")
+
+            if record.overview:
+                record.overview.summary = overview["summary"]
+                record.overview.note = overview.get("note")
+                record.overview.set_json_field("key_findings", overview["key_findings"])
+                record.overview.set_json_field("risks", overview["risks"])
+                record.overview.set_json_field("opportunities", overview["opportunities"])
+            else:
+                doc_overview = DocumentOverviewModel(
+                    document_id=document_id,
+                    summary=overview["summary"],
+                    note=overview.get("note"),
+                )
+                doc_overview.set_json_field("key_findings", overview["key_findings"])
+                doc_overview.set_json_field("risks", overview["risks"])
+                doc_overview.set_json_field("opportunities", overview["opportunities"])
+                record.overview = doc_overview
+
+            record.llm_available = llm.available
+            session.commit()
+            return record.public_payload()
+
 
     def process(self, document_id, file_path, filename):
         """
@@ -125,13 +176,13 @@ class DocumentService:
                     continue
 
                 # Split page text into manageable chunks
-                for chunk_index, chunk_text in enumerate(self.splitter.split_text(text)):
+                for chunk_text in self.splitter.split_text(text):
                     if chunk_text.strip():
                         chunks.append(
                             {
                                 "text": chunk_text.strip(),
                                 "page": page_number,
-                                "chunk_id": chunk_index,
+                                "chunk_id": len(chunks),
                             }
                         )
 
@@ -142,42 +193,71 @@ class DocumentService:
             )
 
         # 3. Create the search index and compute statistics
-        retriever = HybridRetriever(chunks, self.embedding_model)
+        retriever = HybridRetriever(document_id, child_chunks=chunks, parent_chunks=chunks, model_name=self.embedding_model)
         analytics = build_analytics(chunks, page_count, image_count, filename)
-        
+
+        # Resolve the LLM for this request (picks up user key from DB if set)
+        llm = self._get_llm()
+
         # 4. Generate structured summary overview via LLM
-        overview = self._build_overview(chunks, retriever, analytics)
+        overview = self._build_overview(chunks, retriever, analytics, llm=llm)
 
         # 5. Build the complete document record object
-        record = DocumentRecord(
-            document_id=document_id,
-            filename=filename,
-            file_path=file_path,
-            chunks=chunks,
-            analytics=analytics,
-            retriever=retriever,
-            overview=overview,
-            elapsed_seconds=time.perf_counter() - started,
-            llm_available=self.llm.available,
-            vision_available=self.llm.vision_available,
-            visual_pages=visual_pages,
-            preview_dir=file_path.parent / "previews",
-        )
-        
-        # 6. Save the record in the thread-safe repository dictionary
-        with self.lock:
-            self.records[document_id] = record
+        with SessionLocal() as session:
+            doc = DocumentModel(
+                id=document_id,
+                filename=filename,
+                file_path=str(file_path),
+                elapsed_seconds=time.perf_counter() - started,
+                llm_available=llm.available,
+                vision_available=llm.vision_available
+            )
+            doc.set_visual_pages(visual_pages)
             
-        return record.public_payload()
+            doc_analytics = DocumentAnalyticsModel(
+                pages=analytics["pages"],
+                words=analytics["words"],
+                characters=analytics["characters"],
+                chunks=analytics["chunks"],
+                images=analytics["images"],
+                top_terms=json.dumps(analytics["top_terms"]),
+                topics=json.dumps(analytics["topics"]),
+                financial_metrics=json.dumps(analytics["financial_metrics"]),
+                page_distribution=json.dumps(analytics["page_distribution"])
+            )
+            doc.analytics = doc_analytics
+            
+            doc_overview = DocumentOverviewModel(
+                summary=overview["summary"],
+                note=overview.get("note")
+            )
+            doc_overview.set_json_field("key_findings", overview["key_findings"])
+            doc_overview.set_json_field("risks", overview["risks"])
+            doc_overview.set_json_field("opportunities", overview["opportunities"])
+            doc.overview = doc_overview
+            
+            session.add(doc)
+            session.commit()
+            
+            # Cache the retriever so subsequent ask() calls don't reload from disk
+            self._retriever_cache[document_id] = retriever
+            
+            return doc.public_payload()
 
-    def _build_overview(self, chunks, retriever, analytics):
+    def _build_overview(self, chunks, retriever, analytics, llm: LLMService = None):
         """
         Generates a summary overview (executive summary, key findings, risks, opportunities)
         for the uploaded document. Uses search results as context.
+        
+        `llm` should be passed explicitly so the correct user-scoped LLM instance is used.
+        If omitted, a fresh env-based LLMService is created as a fallback.
         """
+        if llm is None:
+            llm = LLMService()
+
         # Create a basic textual fallback from the start of the document in case the LLM is offline
         fallback = clean_text(" ".join(chunk["text"] for chunk in chunks[:4]))[:1500]
-        if not self.llm.available:
+        if not llm.available:
             return {
                 "summary": fallback,
                 "key_findings": [],
@@ -206,11 +286,16 @@ class DocumentService:
         prompt = f"""
 You are analysing an investment or research PDF. Use only the supplied excerpts.
 Return valid JSON with exactly these keys:
-"summary" (a concise paragraph),
-"key_findings" (array of up to 5 strings),
-"risks" (array of up to 5 strings),
-"opportunities" (array of up to 5 strings).
-Do not invent figures. Add page citations like [Page 4] when supported.
+"summary" (a concise paragraph, minimum 2 complete sentences),
+"key_findings" (array of up to 5 strings, each a complete factual sentence),
+"risks" (array of up to 5 strings, each a complete factual sentence),
+"opportunities" (array of up to 5 strings, each a complete factual sentence).
+
+CRITICAL RULES:
+- Never use "..." or "…" as a placeholder. Write real content or omit the item.
+- Each string must be a complete sentence with real information from the excerpts.
+- Do not invent figures. Add page citations like [Page 4] when supported.
+- Output ONLY the JSON object, no other text before or after it.
 
 Document statistics: {analytics['pages']} pages, {analytics['words']} words.
 
@@ -228,15 +313,27 @@ OPPORTUNITIES EXCERPTS
 """
         try:
             # Query the LLM and parse response
-            answer = self.llm.complete([{"role": "user", "content": prompt}], max_tokens=1100)
+            # Use higher max_tokens (4000) to ensure long documents don't truncate JSON outputs
+            answer = llm.complete([{"role": "user", "content": prompt}], max_tokens=4000)
             parsed = self._parse_json(answer)
-            if parsed:
+            if parsed and not self._is_placeholder_response(parsed):
                 return parsed
+            if parsed:
+                # JSON parsed but all values are "..." placeholders (thinking model artifact)
+                return {
+                    "summary": fallback,
+                    "key_findings": [],
+                    "risks": [],
+                    "opportunities": [],
+                    "note": "AI returned placeholder values. Click Regenerate to retry.",
+                }
+            # JSON parsing failed — surface the raw answer as summary and flag for regeneration
             return {
                 "summary": answer or fallback,
                 "key_findings": [],
                 "risks": [],
                 "opportunities": [],
+                "note": "AI responded but the structured output could not be parsed. Click Regenerate to retry.",
             }
         except Exception as exc:
             return {
@@ -255,10 +352,16 @@ OPPORTUNITIES EXCERPTS
         - Encodes PDF pages to base64 images if multimodal/vision is supported.
         - Returns a structured answer, text sources, and visual previews.
         """
-        record = self.records[document_id]
+        with SessionLocal() as session:
+            record = session.query(DocumentModel).filter_by(id=document_id).first()
+            if not record:
+                raise KeyError("Document not found.")
+            visual_pages_from_record = record.get_visual_pages()
+
+        retriever = self._get_retriever(document_id)
         
         # 1. Search the index for passages matching the user's question
-        results = record.retriever.search(question, candidate_k=28, final_k=7)
+        results = retriever.search(question, candidate_k=28, final_k=7)
         sources = [
             {
                 "page": row["page"],
@@ -277,13 +380,13 @@ OPPORTUNITIES EXCERPTS
         # Filter visual pages out of these top relevant pages
         visual_pages = [
             page for page in relevant_pages
-            if page in record.visual_pages
+            if page in visual_pages_from_record
         ]
         
         # If the user explicitly asks for visual charts/graphs but no visual pages were matched,
         # fallback to attaching the first few visual pages in the document
         if not visual_pages and self._is_visual_question(question):
-            visual_pages = record.visual_pages[:3]
+            visual_pages = visual_pages_from_record[:3]
             
         # Create preview URL dictionary structures
         visual_sources = [
@@ -294,8 +397,14 @@ OPPORTUNITIES EXCERPTS
             for page in visual_pages
         ]
 
+        # Resolve the LLM for this request
+        with SessionLocal() as session:
+            doc_record = session.query(DocumentModel).filter_by(id=document_id).first()
+            _user_id = doc_record.user_id if doc_record else None
+        llm = self._get_llm(_user_id)
+
         # 2. If the LLM service key is not configured, return sources directly with a note
-        if not self.llm.available:
+        if not llm.available:
             return {
                 "answer": (
                     "The retrieval layer is working, but no LLM API key is configured. "
@@ -335,15 +444,15 @@ OPPORTUNITIES EXCERPTS
         
         answer = None
         # 4. If visual context is present and multimodal vision is supported, send images to the model
-        if visual_pages and self.llm.vision_available:
+        if visual_pages and llm.vision_available:
             images = [
                 {
                     "page": page,
-                    "data_url": self._page_data_url(record, page),
+                    "data_url": self._page_data_url(document_id, page),
                 }
                 for page in visual_pages
             ]
-            answer = self.llm.complete_with_images(
+            answer = llm.complete_with_images(
                 messages[0]["content"],
                 question,
                 context,
@@ -353,8 +462,8 @@ OPPORTUNITIES EXCERPTS
 
         # 5. Text-only fallback request
         if not answer:
-            answer = self.llm.complete(messages, max_tokens=900)
-            if visual_pages and not self.llm.vision_available:
+            answer = llm.complete(messages, max_tokens=900)
+            if visual_pages and not llm.vision_available:
                 answer += (
                     "\n\nRelevant visual pages are attached below. "
                     "Configure VISION_MODEL (or GROQ_VISION_MODEL) for direct chart interpretation."
@@ -372,31 +481,38 @@ OPPORTUNITIES EXCERPTS
         Returns the absolute filepath of the generated image.
         Uses scaling matrix (1.45x) to guarantee quality.
         """
-        record = self.records[document_id]
-        if page_number < 1 or page_number > record.analytics["pages"]:
+        with SessionLocal() as session:
+            record = session.query(DocumentModel).filter_by(id=document_id).first()
+            if not record:
+                raise KeyError("Document not found.")
+            file_path = Path(record.file_path)
+            pages_count = record.analytics.pages
+            
+        if page_number < 1 or page_number > pages_count:
             raise ValueError("Page number is outside this document.")
 
-        record.preview_dir.mkdir(parents=True, exist_ok=True)
-        preview_path = record.preview_dir / f"page_{page_number}.png"
+        preview_dir = file_path.parent / "previews"
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_path = preview_dir / f"page_{page_number}.png"
         
         # Return already rendered cached images if they exist
         if preview_path.exists():
             return preview_path
 
         # Render the PDF page using PyMuPDF (fitz) pixmap representation
-        with fitz.open(record.file_path) as pdf:
+        with fitz.open(file_path) as pdf:
             page = pdf[page_number - 1]
             pixmap = page.get_pixmap(matrix=fitz.Matrix(1.45, 1.45), alpha=False)
             pixmap.save(preview_path)
             
         return preview_path
 
-    def _page_data_url(self, record, page_number):
+    def _page_data_url(self, document_id, page_number):
         """
         Renders a page, reads the image bytes, base64 encodes it,
         and generates a data URL scheme suitable for LLM vision models.
         """
-        preview_path = self.render_page(record.document_id, page_number)
+        preview_path = self.render_page(document_id, page_number)
         encoded = base64.b64encode(preview_path.read_bytes()).decode("ascii")
         return f"data:image/png;base64,{encoded}"
 
@@ -415,21 +531,55 @@ OPPORTUNITIES EXCERPTS
         )
 
     @staticmethod
+    def _is_placeholder_response(parsed: dict) -> bool:
+        """
+        Returns True when a parsed overview JSON contains only placeholder '...' / '\u2026' values.
+        This happens with Groq Qwen3 (and similar thinking models) when the reasoning tokens
+        consume most of max_tokens and the model writes ellipsis filler for the actual answer.
+        """
+        PLACEHOLDERS = {"", "...", "\u2026", "…"}
+        for key in ("summary", "key_findings", "risks", "opportunities"):
+            val = parsed.get(key)
+            if isinstance(val, list):
+                # Flag if EVERY item in the list is a placeholder
+                if val and all(str(v).strip() in PLACEHOLDERS for v in val):
+                    return True
+            elif isinstance(val, str):
+                if val.strip() in PLACEHOLDERS:
+                    return True
+        return False
+
+    @staticmethod
     def _parse_json(text):
         """
         Utility function to isolate and parse a JSON block from LLM text responses.
         Ensures required fields for the document overview are present.
+        
+        Handles:
+        - Thinking-model output: strips <think>...</think> blocks (Qwen3, DeepSeek-R1, etc.)
+        - Markdown code fences: extracts JSON from ```json ... ``` blocks
+        - Bare JSON objects anywhere in the response text
         """
         if not text:
             return None
         import json
 
-        # Capture text inside curly brackets
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            return None
+        # 1. Strip thinking-model reasoning blocks before attempting JSON extraction
+        cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+        # 2. Prefer JSON inside a markdown code fence (``` json ... ``` or ``` ... ```)
+        code_fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+        if code_fence:
+            candidate = code_fence.group(1)
+        else:
+            # 3. Fall back to the outermost bare JSON object in the text
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if not match:
+                return None
+            candidate = match.group()
+
         try:
-            parsed = json.loads(match.group())
+            parsed = json.loads(candidate)
             required = {"summary", "key_findings", "risks", "opportunities"}
             # Ensure the required keys exist in the parsed dictionary
             return parsed if required.issubset(parsed) else None

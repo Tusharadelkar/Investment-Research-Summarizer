@@ -21,8 +21,28 @@
         <small>Document intelligence workspace</small>
       </span>
     </a>
-    <button id="new-document" class="button button-quiet hidden">Upload new PDF</button>
+    <div class="header-actions" style="display: flex; gap: 1rem; align-items: center;">
+      <button id="settings-button" class="button button-quiet">Settings</button>
+      <a href="/logout" class="button button-quiet">Logout</a>
+      <button id="new-document" class="button button-quiet hidden">Upload new PDF</button>
+    </div>
   </header>
+
+  <!-- Settings Modal -->
+  <dialog id="settings-modal" class="modal">
+    <div class="modal-content panel">
+      <h2>Account Settings</h2>
+      <form id="settings-form" method="POST" action="/api/users/settings">
+        <label for="api-key">Custom LLM API Key</label>
+        <input type="password" id="api-key" name="api_key" placeholder="Enter your own Groq or OpenAI key to bypass rate limits">
+        <p class="hint">Leave blank to use the shared system key (50 questions/day limit).</p>
+        <div class="modal-actions">
+          <button type="button" id="close-settings" class="button button-quiet">Cancel</button>
+          <button type="submit" class="button button-primary">Save Settings</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
 
   <main class="shell">
     <section id="upload-view" class="upload-view">
@@ -65,7 +85,10 @@
           <h1 id="document-name">—</h1>
           <p id="document-meta">Ready for analysis</p>
         </div>
-        <span class="status-pill"><i></i> Indexed</span>
+        <div class="document-actions">
+          <span class="status-pill"><i></i> Indexed</span>
+          <button id="export-button" class="button button-quiet">Export to Word</button>
+        </div>
       </div>
 
       <nav class="tabs" aria-label="Document workspace">
@@ -86,6 +109,10 @@
               <span id="llm-state" class="subtle-pill"></span>
             </div>
             <p id="summary-text" class="summary-text"></p>
+            <div id="regenerate-bar" class="hidden" style="margin-top:1rem">
+              <button id="regenerate-button" class="button button-primary" style="font-size:0.85rem;padding:0.5rem 1.2rem">⟳ Regenerate Insights</button>
+              <span id="regenerate-status" style="margin-left:0.75rem;font-size:0.82rem;opacity:0.7"></span>
+            </div>
           </article>
 
           <article class="panel terms-panel">
