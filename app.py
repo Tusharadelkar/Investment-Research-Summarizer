@@ -1,5 +1,6 @@
 # Import standard libraries for file and folder operations and unique identifier generation
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import uuid
 from pathlib import Path
 
@@ -164,7 +165,7 @@ def too_large(_error):
 # Main entry point to run the Flask application
 if __name__ == "__main__":
     app.run(
-        host=os.getenv("FLASK_HOST", "127.0.0.1"),
-        port=int(os.getenv("FLASK_PORT", "5000")),
+        host=os.getenv("FLASK_HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", os.getenv("FLASK_PORT", "5000"))),
         debug=os.getenv("FLASK_DEBUG", "false").lower() == "true",
     )
