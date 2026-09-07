@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: investment-research-summarizer
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 2 --timeout 120
+    plan: free
+
+    envVars:
+      - key: FLASK_SECRET_KEY
+        generateValue: true          # Render auto-generates a secure random value
+
+      - key: FLASK_DEBUG
+        value: false
+
+      - key: EMBEDDING_MODEL
+        value: sentence-transformers/all-MiniLM-L6-v2
+
+      - key: CHUNK_SIZE
+        value: "900"
+
+      - key: CHUNK_OVERLAP
+        value: "150"
+
+      # --- LLM Provider (set ONE of the following in the Render dashboard) ---
+      # - key: GROQ_API_KEY
+      #   sync: false                # Mark sync:false so you paste the value in the dashboard
+
+      # - key: GROQ_MODEL
+      #   value: llama-3.1-8b-instant
+
+      # - key: OPENAI_API_KEY
+      #   sync: false
+
+      # - key: OPENAI_MODEL
+      #   value: gpt-4o-mini
